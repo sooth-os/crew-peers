@@ -30,6 +30,7 @@ import type {
   PeerBrokerRequest,
 } from "./shared/types.ts";
 import { detectTailscaleIp } from "./tailscale.ts";
+import { bindTailnetWhenReady } from "./tailnet-bind.ts";
 import {
   loadBrokersConfig,
   loadSelfSecret,
@@ -952,26 +953,26 @@ async function main(): Promise<void> {
         `[claude-peers broker] WARNING: brokers.json present but secret-current missing — peer listener will NOT start. Generate a secret first.`,
       );
     } else {
-      // CLAUDE_PEERS_BIND_TS_IP overrides Tailscale detection (used by loopback smoke tests).
-      const tsIp = process.env.CLAUDE_PEERS_BIND_TS_IP ?? (await detectTailscaleIp());
-      if (!tsIp) {
-        console.error(
-          `[claude-peers broker] WARNING: brokers.json present but Tailscale not detected — peer listener will NOT start.`,
-        );
-      } else {
-        Bun.serve({
-          port: PORT_PEER,
-          hostname: tsIp, // explicit interface bind, NEVER 0.0.0.0
-          fetch: handlePeerRequest,
-        });
-        console.error(`[claude-peers broker] peer listener:  ${tsIp}:${PORT_PEER}`);
-        console.error(
-          `[claude-peers broker] peers: ${brokersConfig.peers.map((p) => p.machine).join(", ") || "(none)"}`,
-        );
-        // Periodic health probe + janitor
-        setInterval(() => void healthLoop(), HEALTH_INTERVAL_MS);
-        setInterval(janitor, HEALTH_INTERVAL_MS);
-      }
+      // Not awaited: the local listener serves while Tailscale comes up after boot.
+      const peers = brokersConfig.peers;
+      void bindTailnetWhenReady({
+        // CLAUDE_PEERS_BIND_TS_IP overrides Tailscale detection (used by loopback smoke tests).
+        detect: async () => process.env.CLAUDE_PEERS_BIND_TS_IP ?? (await detectTailscaleIp()),
+        bind: (tsIp) => {
+          Bun.serve({
+            port: PORT_PEER,
+            hostname: tsIp, // explicit interface bind, NEVER 0.0.0.0
+            fetch: handlePeerRequest,
+          });
+          console.error(`[claude-peers broker] peer listener:  ${tsIp}:${PORT_PEER}`);
+          console.error(`[claude-peers broker] peers: ${peers.map((p) => p.machine).join(", ") || "(none)"}`);
+          // Periodic health probe + janitor
+          setInterval(() => void healthLoop(), HEALTH_INTERVAL_MS);
+          setInterval(janitor, HEALTH_INTERVAL_MS);
+        },
+        sleep: (ms) => Bun.sleep(ms),
+        log: (line) => console.error(line),
+      });
     }
   } else {
     console.error(`[claude-peers broker] no brokers.json — single-broker mode (v1 compat)`);
